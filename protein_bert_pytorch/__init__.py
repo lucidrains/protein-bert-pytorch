@@ -1,0 +1,1 @@
+from protein_bert_pytorch.protein_bert_pytorch import ProteinBERT
