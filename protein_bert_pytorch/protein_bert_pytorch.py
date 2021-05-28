@@ -23,7 +23,7 @@ class Residual(nn.Module):
     def forward(self, x):
         return self.fn(x) + x
 
-class GlobalLinearAttention(nn.Module):
+class GlobalLinearSelfAttention(nn.Module):
     def __init__(
         self,
         *,
@@ -60,7 +60,7 @@ class GlobalLinearAttention(nn.Module):
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
-class Attention(nn.Module):
+class CrossAttention(nn.Module):
     def __init__(
         self,
         *,
@@ -132,11 +132,11 @@ class Layer(nn.Module):
         attn_dim_head = 64,
         attn_qk_activation = nn.Tanh(),
         local_to_global_attn = False,
-        global_local_linear_attn = False
+        local_self_attn = False
     ):
         super().__init__()
 
-        self.global_linear_attn = GlobalLinearAttention(dim = dim, dim_head = attn_dim_head, heads = attn_heads) if global_local_linear_attn else None
+        self.seq_self_attn = GlobalLinearSelfAttention(dim = dim, dim_head = attn_dim_head, heads = attn_heads) if local_self_attn else None
 
         self.narrow_conv = nn.Sequential(
             nn.Conv1d(dim, dim, narrow_conv_kernel, padding = narrow_conv_kernel // 2),
@@ -153,7 +153,7 @@ class Layer(nn.Module):
         self.local_to_global_attn = local_to_global_attn
 
         if local_to_global_attn:
-            self.extract_global_info = Attention(
+            self.extract_global_info = CrossAttention(
                 dim = dim,
                 dim_keys = dim_global,
                 dim_out = dim,
@@ -176,7 +176,7 @@ class Layer(nn.Module):
             nn.LayerNorm(dim)
         )
 
-        self.global_attend_local = Attention(dim = dim_global, dim_out = dim_global, dim_keys = dim, heads = attn_heads, dim_head = attn_dim_head, qk_activation = attn_qk_activation)
+        self.global_attend_local = CrossAttention(dim = dim_global, dim_out = dim_global, dim_keys = dim, heads = attn_heads, dim_head = attn_dim_head, qk_activation = attn_qk_activation)
 
         self.global_dense = nn.Sequential(
             nn.Linear(dim_global, dim_global),
@@ -204,7 +204,7 @@ class Layer(nn.Module):
 
         # process local (protein sequence)
 
-        global_linear_attn = self.global_linear_attn(tokens) if exists(self.global_linear_attn) else 0
+        global_linear_attn = self.seq_self_attn(tokens) if exists(self.seq_self_attn) else 0
 
         conv_input = rearrange(tokens, 'b n d -> b d n')
         narrow_out = self.narrow_conv(conv_input)
@@ -242,13 +242,13 @@ class ProteinBERT(nn.Module):
         attn_dim_head = 64,
         attn_qk_activation = nn.Tanh(),
         local_to_global_attn = False,
-        global_local_linear_attn = False
+        local_self_attn = False
     ):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.to_global_emb = nn.Linear(num_annotation, dim_global)
 
-        self.layers = nn.ModuleList([Layer(dim = dim, dim_global = dim_global, narrow_conv_kernel = narrow_conv_kernel, wide_conv_dilation = wide_conv_dilation, wide_conv_kernel = wide_conv_kernel, attn_qk_activation = attn_qk_activation, local_to_global_attn = local_to_global_attn, global_local_linear_attn = global_local_linear_attn) for layer in range(depth)])
+        self.layers = nn.ModuleList([Layer(dim = dim, dim_global = dim_global, narrow_conv_kernel = narrow_conv_kernel, wide_conv_dilation = wide_conv_dilation, wide_conv_kernel = wide_conv_kernel, attn_qk_activation = attn_qk_activation, local_to_global_attn = local_to_global_attn, local_self_attn = local_self_attn) for layer in range(depth)])
 
         self.to_token_logits = nn.Linear(dim, num_tokens)
         self.to_annotation_logits = nn.Linear(dim_global, num_annotation)
