@@ -30,12 +30,15 @@ class Attention(nn.Module):
         dim_keys,
         dim_out,
         heads,
-        dim_head = 64
+        dim_head = 64,
+        qk_activation = nn.Tanh()
     ):
         super().__init__()
         self.heads = heads
         self.scale = dim_head ** -0.5
         inner_dim = dim_head * heads
+
+        self.qk_activation = qk_activation
 
         self.to_q = nn.Linear(dim, inner_dim, bias = False)
         self.to_kv = nn.Linear(dim_keys, inner_dim * 2, bias = False)
@@ -47,6 +50,8 @@ class Attention(nn.Module):
         q = self.to_q(x)
         k, v = self.to_kv(context).chunk(2, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+
+        q, k = map(lambda t: self.qk_activation(t), (q, k))
 
         sim = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
 
@@ -75,7 +80,8 @@ class Layer(nn.Module):
         wide_conv_kernel = 9,
         wide_conv_dilation = 5,
         attn_heads = 8,
-        attn_dim_head = 64
+        attn_dim_head = 64,
+        attn_qk_activation = nn.Tanh()
     ):
         super().__init__()
         self.narrow_conv = nn.Sequential(
@@ -106,7 +112,7 @@ class Layer(nn.Module):
             nn.LayerNorm(dim)
         )
 
-        self.global_attend_local = Attention(dim = dim_global, dim_out = dim_global, dim_keys = dim, heads = attn_heads, dim_head = attn_dim_head)
+        self.global_attend_local = Attention(dim = dim_global, dim_out = dim_global, dim_keys = dim, heads = attn_heads, dim_head = attn_dim_head, qk_activation = attn_qk_activation)
 
         self.global_dense = nn.Sequential(
             nn.Linear(dim_global, dim_global),
@@ -166,13 +172,14 @@ class ProteinBERT(nn.Module):
         wide_conv_kernel = 9,
         wide_conv_dilation = 5,
         attn_heads = 8,
-        attn_dim_head = 64
+        attn_dim_head = 64,
+        attn_qk_activation = nn.Tanh()
     ):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.to_global_emb = nn.Linear(num_annotation, dim_global)
 
-        self.layers = nn.ModuleList([Layer(dim = dim, dim_global = dim_global, narrow_conv_kernel = narrow_conv_kernel, wide_conv_dilation = wide_conv_dilation, wide_conv_kernel = wide_conv_kernel) for layer in range(depth)])
+        self.layers = nn.ModuleList([Layer(dim = dim, dim_global = dim_global, narrow_conv_kernel = narrow_conv_kernel, wide_conv_dilation = wide_conv_dilation, wide_conv_kernel = wide_conv_kernel, attn_qk_activation = attn_qk_activation) for layer in range(depth)])
 
         self.to_token_logits = nn.Linear(dim, num_tokens)
         self.to_annotation_logits = nn.Linear(dim_global, num_annotation)
