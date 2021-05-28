@@ -13,7 +13,8 @@ setup(
         "artificial intelligence",
         "deep learning",
         "attention mechanism",
-        "protein sequences"
+        "protein sequences",
+        "unsupervised learning"
     ],
     install_requires=[
         "einops>=0.3",
