@@ -132,22 +132,25 @@ class Layer(nn.Module):
         attn_dim_head = 64,
         attn_qk_activation = nn.Tanh(),
         local_to_global_attn = False,
-        local_self_attn = False
+        local_self_attn = False,
+        glu_conv = False
     ):
         super().__init__()
 
         self.seq_self_attn = GlobalLinearSelfAttention(dim = dim, dim_head = attn_dim_head, heads = attn_heads) if local_self_attn else None
 
+        conv_mult = 2 if glu_conv else 1
+
         self.narrow_conv = nn.Sequential(
-            nn.Conv1d(dim, dim, narrow_conv_kernel, padding = narrow_conv_kernel // 2),
-            nn.GELU()
+            nn.Conv1d(dim, dim * conv_mult, narrow_conv_kernel, padding = narrow_conv_kernel // 2),
+            nn.GELU() if not glu_conv else nn.GLU(dim = 1)
         )
 
         wide_conv_padding = (wide_conv_kernel + (wide_conv_kernel - 1) * (wide_conv_dilation - 1)) // 2
 
         self.wide_conv = nn.Sequential(
-            nn.Conv1d(dim, dim, wide_conv_kernel, dilation = wide_conv_dilation, padding = wide_conv_padding),
-            nn.GELU()
+            nn.Conv1d(dim, dim * conv_mult, wide_conv_kernel, dilation = wide_conv_dilation, padding = wide_conv_padding),
+            nn.GELU() if not glu_conv else nn.GLU(dim = 1)
         )
 
         self.local_to_global_attn = local_to_global_attn
@@ -242,13 +245,14 @@ class ProteinBERT(nn.Module):
         attn_dim_head = 64,
         attn_qk_activation = nn.Tanh(),
         local_to_global_attn = False,
-        local_self_attn = False
+        local_self_attn = False,
+        glu_conv = False
     ):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.to_global_emb = nn.Linear(num_annotation, dim_global)
 
-        self.layers = nn.ModuleList([Layer(dim = dim, dim_global = dim_global, narrow_conv_kernel = narrow_conv_kernel, wide_conv_dilation = wide_conv_dilation, wide_conv_kernel = wide_conv_kernel, attn_qk_activation = attn_qk_activation, local_to_global_attn = local_to_global_attn, local_self_attn = local_self_attn) for layer in range(depth)])
+        self.layers = nn.ModuleList([Layer(dim = dim, dim_global = dim_global, narrow_conv_kernel = narrow_conv_kernel, wide_conv_dilation = wide_conv_dilation, wide_conv_kernel = wide_conv_kernel, attn_qk_activation = attn_qk_activation, local_to_global_attn = local_to_global_attn, local_self_attn = local_self_attn, glu_conv = glu_conv) for layer in range(depth)])
 
         self.to_token_logits = nn.Linear(dim, num_tokens)
         self.to_annotation_logits = nn.Linear(dim_global, num_annotation)
