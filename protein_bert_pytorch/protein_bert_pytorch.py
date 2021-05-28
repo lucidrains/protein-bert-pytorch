@@ -1,8 +1,9 @@
 import torch
+import torch.nn.functional as F
 from torch import nn, einsum
 
 from einops.layers.torch import Rearrange
-from einops import rearrange
+from einops import rearrange, repeat
 
 # helpers
 
@@ -21,6 +22,43 @@ class Residual(nn.Module):
 
     def forward(self, x):
         return self.fn(x) + x
+
+class GlobalLinearAttention(nn.Module):
+    def __init__(
+        self,
+        *,
+        dim,
+        dim_head,
+        heads
+    ):
+        super().__init__()
+        inner_dim = dim_head * heads
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
+        self.to_out = nn.Linear(inner_dim, dim)
+
+    def forward(self, feats, mask = None):
+        h = self.heads
+        q, k, v = self.to_qkv(feats).chunk(3, dim = -1)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+
+        if exists(mask):
+            mask = rearrange(mask, 'b n -> b () n ()')
+            k.masked_fill_(~mask, -torch.finfo(k.dtype).max)
+
+        q = q.softmax(dim = -1)
+        k = k.softmax(dim = -2)
+
+        q = q * self.scale
+
+        if exists(mask):
+            v.masked_fill_(~mask, 0.)
+
+        context = einsum('b h n d, b h n e -> b h d e', k, v)
+        out = einsum('b h d e, b h n d -> b h n e', context, q)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
 
 class Attention(nn.Module):
     def __init__(
@@ -44,6 +82,9 @@ class Attention(nn.Module):
         self.to_kv = nn.Linear(dim_keys, inner_dim * 2, bias = False)
         self.to_out = nn.Linear(inner_dim, dim_out)
 
+        self.null_key = nn.Parameter(torch.randn(dim_head))
+        self.null_value = nn.Parameter(torch.randn(dim_head))
+
     def forward(self, x, context, mask = None, context_mask = None):
         b, h, device = x.shape[0], self.heads, x.device
 
@@ -51,16 +92,24 @@ class Attention(nn.Module):
         k, v = self.to_kv(context).chunk(2, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
 
+        null_k, null_v = map(lambda t: repeat(t, 'd -> b h () d', b = b, h = h), (self.null_key, self.null_value))
+        k = torch.cat((null_k, k), dim = -2)
+        v = torch.cat((null_v, v), dim = -2)
+
         q, k = map(lambda t: self.qk_activation(t), (q, k))
 
         sim = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
 
         if exists(mask) or exists(context_mask):
-            if not exists(mask):
-                mask = torch.ones(b, q.shape[-2], dtype = torch.bool, device = device)
+            i, j = sim.shape[-2:]
 
-            if not exists(context_mask):
-                context_mask = torch.ones(b, k.shape[-2], dtype = torch.bool, device = device)
+            if not exists(mask):
+                mask = torch.ones(b, i, dtype = torch.bool, device = device)
+
+            if exists(context_mask):
+                context_mask = F.pad(context_mask, (1, 0), value = True)
+            else:
+                context_mask = torch.ones(b, j, dtype = torch.bool, device = device)
 
             mask = rearrange(mask, 'b i -> b () i ()') * rearrange(context_mask, 'b j -> b () () j')
             sim.masked_fill_(~mask, max_neg_value(sim))
@@ -81,9 +130,14 @@ class Layer(nn.Module):
         wide_conv_dilation = 5,
         attn_heads = 8,
         attn_dim_head = 64,
-        attn_qk_activation = nn.Tanh()
+        attn_qk_activation = nn.Tanh(),
+        local_to_global_attn = False,
+        global_local_linear_attn = False
     ):
         super().__init__()
+
+        self.global_linear_attn = GlobalLinearAttention(dim = dim, dim_head = attn_dim_head, heads = attn_heads) if global_local_linear_attn else None
+
         self.narrow_conv = nn.Sequential(
             nn.Conv1d(dim, dim, narrow_conv_kernel, padding = narrow_conv_kernel // 2),
             nn.GELU()
@@ -96,11 +150,21 @@ class Layer(nn.Module):
             nn.GELU()
         )
 
-        self.global_to_local = nn.Sequential(
-            nn.Linear(dim_global, dim),
-            nn.GELU(),
-            Rearrange('b d -> b () d')
-        )
+        self.local_to_global_attn = local_to_global_attn
+
+        if local_to_global_attn:
+            self.extract_global_info = Attention(
+                dim = dim,
+                dim_keys = dim_global,
+                dim_out = dim,
+                heads = attn_heads,
+                dim_head = attn_dim_head
+            )
+        else:
+            self.extract_global_info = nn.Sequential(
+                nn.Linear(dim_global, dim),
+                nn.GELU()
+            )
 
         self.local_norm = nn.LayerNorm(dim)
 
@@ -122,18 +186,25 @@ class Layer(nn.Module):
         self.global_norm = nn.LayerNorm(dim_global)
 
         self.global_feedforward = nn.Sequential(
+            Rearrange('b () d -> b d'),
             Residual(nn.Sequential(
                 nn.Linear(dim_global, dim_global),
                 nn.GELU()
             )),
-            nn.LayerNorm(dim_global)
+            nn.LayerNorm(dim_global),
         )
 
     def forward(self, tokens, annotation, mask = None):
+        annotation = rearrange(annotation, 'b d -> b () d')
 
-        global_info = self.global_to_local(annotation)
+        if self.local_to_global_attn:
+            global_info = self.extract_global_info(tokens, annotation, mask = mask)
+        else:
+            global_info = self.extract_global_info(annotation)
 
         # process local (protein sequence)
+
+        global_linear_attn = self.global_linear_attn(tokens) if exists(self.global_linear_attn) else 0
 
         conv_input = rearrange(tokens, 'b n d -> b d n')
         narrow_out = self.narrow_conv(conv_input)
@@ -141,22 +212,18 @@ class Layer(nn.Module):
         wide_out = self.wide_conv(conv_input)
         wide_out = rearrange(wide_out, 'b d n -> b n d')
 
-        tokens = tokens + narrow_out + wide_out + global_info
+        tokens = tokens + narrow_out + wide_out + global_info + global_linear_attn
         tokens = self.local_norm(tokens)
 
         tokens = self.local_feedforward(tokens)
 
         # process global (annotations)
 
-        one_global_token = rearrange(annotation, 'b d -> b () d')
-
-        local_info = self.global_attend_local(one_global_token, tokens, context_mask = mask)
+        local_info = self.global_attend_local(annotation, tokens, context_mask = mask)
         annotation = self.global_dense(annotation)
-
-        annotation = annotation + rearrange(local_info, 'b () d -> b d')
         annotation = self.global_norm(annotation)
-
         annotation = self.global_feedforward(annotation)
+
         return tokens, annotation
 
 class ProteinBERT(nn.Module):
@@ -173,13 +240,15 @@ class ProteinBERT(nn.Module):
         wide_conv_dilation = 5,
         attn_heads = 8,
         attn_dim_head = 64,
-        attn_qk_activation = nn.Tanh()
+        attn_qk_activation = nn.Tanh(),
+        local_to_global_attn = False,
+        global_local_linear_attn = False
     ):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
         self.to_global_emb = nn.Linear(num_annotation, dim_global)
 
-        self.layers = nn.ModuleList([Layer(dim = dim, dim_global = dim_global, narrow_conv_kernel = narrow_conv_kernel, wide_conv_dilation = wide_conv_dilation, wide_conv_kernel = wide_conv_kernel, attn_qk_activation = attn_qk_activation) for layer in range(depth)])
+        self.layers = nn.ModuleList([Layer(dim = dim, dim_global = dim_global, narrow_conv_kernel = narrow_conv_kernel, wide_conv_dilation = wide_conv_dilation, wide_conv_kernel = wide_conv_kernel, attn_qk_activation = attn_qk_activation, local_to_global_attn = local_to_global_attn, global_local_linear_attn = global_local_linear_attn) for layer in range(depth)])
 
         self.to_token_logits = nn.Linear(dim, num_tokens)
         self.to_annotation_logits = nn.Linear(dim_global, num_annotation)
@@ -191,4 +260,6 @@ class ProteinBERT(nn.Module):
         for layer in self.layers:
             tokens, annotation = layer(tokens, annotation, mask = mask)
 
-        return self.to_token_logits(tokens), self.to_annotation_logits(annotation)
+        tokens = self.to_token_logits(tokens)
+        annotation = self.to_annotation_logits(annotation)
+        return tokens, annotation
