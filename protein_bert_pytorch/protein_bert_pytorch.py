@@ -210,6 +210,11 @@ class Layer(nn.Module):
         global_linear_attn = self.seq_self_attn(tokens) if exists(self.seq_self_attn) else 0
 
         conv_input = rearrange(tokens, 'b n d -> b d n')
+
+        if exists(mask):
+            conv_input_mask = rearrange(mask, 'b n -> b () n')
+            conv_input.masked_fill_(~conv_input_mask, 0.)
+
         narrow_out = self.narrow_conv(conv_input)
         narrow_out = rearrange(narrow_out, 'b d n -> b n d')
         wide_out = self.wide_conv(conv_input)
