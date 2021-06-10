@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, einsum
 
-from einops.layers.torch import Rearrange
+from einops.layers.torch import Rearrange, Reduce
 from einops import rearrange, repeat
 
 # helpers
@@ -165,8 +165,10 @@ class Layer(nn.Module):
             )
         else:
             self.extract_global_info = nn.Sequential(
+                Reduce('b n d -> b d', 'mean'),
                 nn.Linear(dim_global, dim),
-                nn.GELU()
+                nn.GELU(),
+                Rearrange('b d -> b () d')
             )
 
         self.local_norm = nn.LayerNorm(dim)
@@ -189,7 +191,6 @@ class Layer(nn.Module):
         self.global_norm = nn.LayerNorm(dim_global)
 
         self.global_feedforward = nn.Sequential(
-            Rearrange('b () d -> b d'),
             Residual(nn.Sequential(
                 nn.Linear(dim_global, dim_global),
                 nn.GELU()
@@ -198,8 +199,6 @@ class Layer(nn.Module):
         )
 
     def forward(self, tokens, annotation, mask = None):
-        annotation = rearrange(annotation, 'b d -> b () d')
-
         if self.local_to_global_attn:
             global_info = self.extract_global_info(tokens, annotation, mask = mask)
         else:
@@ -251,20 +250,29 @@ class ProteinBERT(nn.Module):
         attn_qk_activation = nn.Tanh(),
         local_to_global_attn = False,
         local_self_attn = False,
+        num_global_tokens = 1,
         glu_conv = False
     ):
         super().__init__()
         self.token_emb = nn.Embedding(num_tokens, dim)
-        self.to_global_emb = nn.Linear(num_annotation, dim_global)
+
+        self.num_global_tokens = num_global_tokens
+        self.to_global_emb = nn.Linear(num_annotation, num_global_tokens * dim_global)
 
         self.layers = nn.ModuleList([Layer(dim = dim, dim_global = dim_global, narrow_conv_kernel = narrow_conv_kernel, wide_conv_dilation = wide_conv_dilation, wide_conv_kernel = wide_conv_kernel, attn_qk_activation = attn_qk_activation, local_to_global_attn = local_to_global_attn, local_self_attn = local_self_attn, glu_conv = glu_conv) for layer in range(depth)])
 
         self.to_token_logits = nn.Linear(dim, num_tokens)
-        self.to_annotation_logits = nn.Linear(dim_global, num_annotation)
+
+        self.to_annotation_logits = nn.Sequential(
+            Reduce('b n d -> b d', 'mean'),
+            nn.Linear(dim_global, num_annotation)
+        )
 
     def forward(self, seq, annotation, mask = None):
         tokens = self.token_emb(seq)
+
         annotation = self.to_global_emb(annotation)
+        annotation = rearrange(annotation, 'b (n d) -> b n d', n = self.num_global_tokens)
 
         for layer in self.layers:
             tokens, annotation = layer(tokens, annotation, mask = mask)
