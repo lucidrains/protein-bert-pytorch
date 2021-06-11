@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn.functional as F
 from torch import nn, einsum
@@ -45,7 +46,7 @@ class GlobalLinearSelfAttention(nn.Module):
 
         if exists(mask):
             mask = rearrange(mask, 'b n -> b () n ()')
-            k.masked_fill_(~mask, -torch.finfo(k.dtype).max)
+            k = k.masked_fill(~mask, -torch.finfo(k.dtype).max)
 
         q = q.softmax(dim = -1)
         k = k.softmax(dim = -2)
@@ -53,7 +54,7 @@ class GlobalLinearSelfAttention(nn.Module):
         q = q * self.scale
 
         if exists(mask):
-            v.masked_fill_(~mask, 0.)
+            v = v.masked_fill(~mask, 0.)
 
         context = einsum('b h n d, b h n e -> b h d e', k, v)
         out = einsum('b h d e, b h n d -> b h n e', context, q)
@@ -212,7 +213,7 @@ class Layer(nn.Module):
 
         if exists(mask):
             conv_input_mask = rearrange(mask, 'b n -> b () n')
-            conv_input.masked_fill_(~conv_input_mask, 0.)
+            conv_input = conv_input.masked_fill(~conv_input_mask, 0.)
 
         narrow_out = self.narrow_conv(conv_input)
         narrow_out = rearrange(narrow_out, 'b d n -> b n d')
@@ -233,11 +234,13 @@ class Layer(nn.Module):
 
         return tokens, annotation
 
+# main model
+
 class ProteinBERT(nn.Module):
     def __init__(
         self,
         *,
-        num_tokens = 21,
+        num_tokens = 26,
         num_annotation = 8943,
         dim = 512,
         dim_global = 256,
@@ -254,6 +257,7 @@ class ProteinBERT(nn.Module):
         glu_conv = False
     ):
         super().__init__()
+        self.num_tokens = num_tokens
         self.token_emb = nn.Embedding(num_tokens, dim)
 
         self.num_global_tokens = num_global_tokens
@@ -280,3 +284,103 @@ class ProteinBERT(nn.Module):
         tokens = self.to_token_logits(tokens)
         annotation = self.to_annotation_logits(annotation)
         return tokens, annotation
+
+# pretraining wrapper
+
+def get_mask_subset_with_prob(mask, prob):
+    batch, seq_len, device = *mask.shape, mask.device
+    max_masked = math.ceil(prob * seq_len)
+
+    num_tokens = mask.sum(dim=-1, keepdim=True)
+    mask_excess = (mask.cumsum(dim=-1) > (num_tokens * prob).ceil())
+    mask_excess = mask_excess[:, :max_masked]
+
+    rand = torch.rand((batch, seq_len), device=device).masked_fill(~mask, -1e9)
+    _, sampled_indices = rand.topk(max_masked, dim=-1)
+    sampled_indices = (sampled_indices + 1).masked_fill_(mask_excess, 0)
+
+    new_mask = torch.zeros((batch, seq_len + 1), device=device)
+    new_mask.scatter_(-1, sampled_indices, 1)
+    return new_mask[:, 1:].bool()
+
+class PretrainingWrapper(nn.Module):
+    def __init__(
+        self,
+        model,
+        random_replace_token_prob = 0.05,
+        remove_annotation_prob = 0.25,
+        remove_all_annotations_prob = 0.5,
+        seq_loss_weight = 1.,
+        annotation_loss_weight = 1.,
+        valid_token_id_range_min = 3,   # min of the token id ranges, for calculating the random tokens to be masked in
+        exclude_token_ids = (0, 1, 2)   # for excluding padding, start, and end tokens from being masked
+    ):
+        super().__init__()
+        assert isinstance(model, ProteinBERT), 'model must be an instance of ProteinBERT'
+
+        self.model = model
+
+        self.random_replace_token_prob = random_replace_token_prob
+        self.remove_annotation_prob = remove_annotation_prob
+        self.remove_all_annotations_prob = remove_all_annotations_prob
+
+        self.seq_loss_weight = seq_loss_weight
+        self.annotation_loss_weight = annotation_loss_weight
+
+        self.valid_token_id_range_min = valid_token_id_range_min
+        self.exclude_token_ids = exclude_token_ids
+
+    def forward(self, seq, annotation, mask = None):
+        batch_size, device = seq.shape[0], seq.device
+
+        seq_labels = seq
+        annotation_labels = annotation
+
+        if not exists(mask):
+            mask = torch.ones_like(seq).bool()
+
+        # prepare masks for noising sequence
+
+        excluded_tokens_mask = mask
+
+        for token_id in self.exclude_token_ids:
+            excluded_tokens_mask = excluded_tokens_mask & (seq != token_id)
+
+        random_replace_token_prob_mask = get_mask_subset_with_prob(excluded_tokens_mask, self.random_replace_token_prob)
+
+        # prepare masks for noising annotation
+
+        batch_mask = torch.ones(batch_size, device = device, dtype = torch.bool)
+        batch_mask = rearrange(batch_mask, 'b -> b ()')
+        remove_annotation_from_batch_mask = get_mask_subset_with_prob(batch_mask, self.remove_all_annotations_prob)
+
+        annotation_mask = annotation > 0
+        remove_annotation_prob_mask = get_mask_subset_with_prob(annotation_mask, self.remove_annotation_prob)
+
+        remove_annotation_mask = remove_annotation_from_batch_mask & remove_annotation_prob_mask
+
+        # generate random tokens
+
+        random_tokens = torch.randint(self.valid_token_id_range_min, self.model.num_tokens, seq.shape)
+
+        # noise sequence
+
+        noised_seq = torch.where(random_replace_token_prob_mask, random_tokens, seq)
+
+        # noise annotation
+
+        noised_annotation = annotation * remove_annotation_mask.type(annotation.dtype)
+
+        # denoise with model
+
+        seq_logits, annotation_logits = self.model(noised_seq, noised_annotation, mask = mask)
+
+        # calculate loss
+
+        seq_logits = seq_logits[mask]
+        seq_labels = seq_labels[mask]
+
+        seq_loss = F.cross_entropy(seq_logits, seq_labels, reduction = 'sum')
+        annotation_loss = F.binary_cross_entropy_with_logits(annotation_logits, annotation_labels, reduction = 'sum')
+
+        return seq_loss * self.seq_loss_weight + annotation_loss * self.annotation_loss_weight

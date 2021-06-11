@@ -1,1 +1,1 @@
-from protein_bert_pytorch.protein_bert_pytorch import ProteinBERT
+from protein_bert_pytorch.protein_bert_pytorch import ProteinBERT, PretrainingWrapper
