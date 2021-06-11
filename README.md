@@ -66,7 +66,6 @@ learner = PretrainingWrapper(
     remove_all_annotations_prob = 0.5,   # what percentage of batch items to remove annotations for completely, defaults to 50%
     seq_loss_weight = 1.,                # weight on loss of sequence
     annotation_loss_weight = 1.,         # weight on loss of annotation
-    valid_token_id_range_min = 3,        # assuming your token id starts with reserved tokens, this is the index from where up is all the amino acid token ids. as in the paper, 0, 1, 2 is reserved for padding, start and end tokens
     exclude_token_ids = (0, 1, 2)        # for excluding padding, start, and end tokens from being masked
 )
 

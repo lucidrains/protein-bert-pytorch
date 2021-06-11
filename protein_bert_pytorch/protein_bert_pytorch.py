@@ -312,7 +312,6 @@ class PretrainingWrapper(nn.Module):
         remove_all_annotations_prob = 0.5,
         seq_loss_weight = 1.,
         annotation_loss_weight = 1.,
-        valid_token_id_range_min = 3,   # min of the token id ranges, for calculating the random tokens to be masked in
         exclude_token_ids = (0, 1, 2)   # for excluding padding, start, and end tokens from being masked
     ):
         super().__init__()
@@ -327,7 +326,6 @@ class PretrainingWrapper(nn.Module):
         self.seq_loss_weight = seq_loss_weight
         self.annotation_loss_weight = annotation_loss_weight
 
-        self.valid_token_id_range_min = valid_token_id_range_min
         self.exclude_token_ids = exclude_token_ids
 
     def forward(self, seq, annotation, mask = None):
@@ -361,7 +359,10 @@ class PretrainingWrapper(nn.Module):
 
         # generate random tokens
 
-        random_tokens = torch.randint(self.valid_token_id_range_min, self.model.num_tokens, seq.shape)
+        random_tokens = torch.randint(0, self.model.num_tokens, seq.shape)
+
+        for token_id in self.exclude_token_ids:
+            random_replace_token_prob_mask = random_replace_token_prob_mask & (random_tokens != token_id)  # make sure you never substitute a token with an excluded token type (pad, start, end)
 
         # noise sequence
 
