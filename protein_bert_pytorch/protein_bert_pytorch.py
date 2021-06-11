@@ -309,6 +309,7 @@ class PretrainingWrapper(nn.Module):
         model,
         random_replace_token_prob = 0.05,
         remove_annotation_prob = 0.25,
+        add_annotation_prob = 0.01,
         remove_all_annotations_prob = 0.5,
         seq_loss_weight = 1.,
         annotation_loss_weight = 1.,
@@ -321,6 +322,7 @@ class PretrainingWrapper(nn.Module):
 
         self.random_replace_token_prob = random_replace_token_prob
         self.remove_annotation_prob = remove_annotation_prob
+        self.add_annotation_prob = add_annotation_prob
         self.remove_all_annotations_prob = remove_all_annotations_prob
 
         self.seq_loss_weight = seq_loss_weight
@@ -354,7 +356,7 @@ class PretrainingWrapper(nn.Module):
 
         annotation_mask = annotation > 0
         remove_annotation_prob_mask = get_mask_subset_with_prob(annotation_mask, self.remove_annotation_prob)
-
+        add_annotation_prob_mask = get_mask_subset_with_prob(~annotation_mask, self.add_annotation_prob)
         remove_annotation_mask = remove_annotation_from_batch_mask & remove_annotation_prob_mask
 
         # generate random tokens
@@ -370,7 +372,8 @@ class PretrainingWrapper(nn.Module):
 
         # noise annotation
 
-        noised_annotation = annotation * remove_annotation_mask.type(annotation.dtype)
+        noised_annotation = annotation + add_annotation_prob_mask.type(annotation.dtype)
+        noised_annotation = noised_annotation * remove_annotation_mask.type(annotation.dtype)
 
         # denoise with model
 

@@ -63,6 +63,7 @@ learner = PretrainingWrapper(
     model,
     random_replace_token_prob = 0.05,    # what percentage of the tokens to replace with a random one, defaults to 5% as in paper
     remove_annotation_prob = 0.25,       # what percentage of annotations to remove, defaults to 25%
+    add_annotation_prob = 0.01,          # probability to add an annotation randomly, defaults to 1%
     remove_all_annotations_prob = 0.5,   # what percentage of batch items to remove annotations for completely, defaults to 50%
     seq_loss_weight = 1.,                # weight on loss of sequence
     annotation_loss_weight = 1.,         # weight on loss of annotation
