@@ -361,7 +361,7 @@ class PretrainingWrapper(nn.Module):
 
         # generate random tokens
 
-        random_tokens = torch.randint(0, self.model.num_tokens, seq.shape)
+        random_tokens = torch.randint(0, self.model.num_tokens, seq.shape, device=seq.device)
 
         for token_id in self.exclude_token_ids:
             random_replace_token_prob_mask = random_replace_token_prob_mask & (random_tokens != token_id)  # make sure you never substitute a token with an excluded token type (pad, start, end)
