@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name="protein-bert-pytorch",
     packages=find_packages(),
-    version="0.0.11",
+    version="0.1.0",
     license="MIT",
     description="ProteinBERT - Pytorch",
     author="Phil Wang",

@@ -227,7 +227,7 @@ class Layer(nn.Module):
 
         # process global (annotations)
 
-        local_info = self.global_attend_local(annotation, tokens, context_mask = mask)
+        annotation = self.global_attend_local(annotation, tokens, context_mask = mask)
         annotation = self.global_dense(annotation)
         annotation = self.global_norm(annotation)
         annotation = self.global_feedforward(annotation)
